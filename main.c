@@ -150,7 +150,9 @@
 
 #define SAMPLES_IN_BUFFER               50                                          /**< SAADC buffer > */
 
-#define DATA_INTERVAL                   300000
+//#define CLIENT_DATA_INTERVAL            300000
+#define CLIENT_DATA_INTERVAL            4000
+#define DEMO_DATA_INTERVAL              1000
 
 #define NRF_SAADC_CUSTOM_CHANNEL_CONFIG_SE(PIN_P) \
 {                                                   \
@@ -231,6 +233,8 @@ bool     PT2_READ          = false;
 bool     PT3_READ          = false;
 bool     SEND_BUFFERED_DATA  = false;
 bool     HVN_TX_EVT_COMPLETE = false;
+bool     DEMO_PROTO_FLAG     = false;
+bool     CLIENT_PROTO_FLAG   = true;  // Always begin in client mode
 
 static volatile uint8_t write_flag=0;
 
@@ -266,6 +270,7 @@ void disable_isfet_circuit      (void);
 void turn_chip_power_on         (void);
 void turn_chip_power_off         (void);
 void restart_saadc              (void);
+void reset_total_packet         (void);
 void write_cal_values_to_flash   (void);
 void check_for_buffer_done_signal(char **packet);
 void linreg                     (int num, float x[], float y[]);
@@ -417,6 +422,19 @@ void check_for_buffer_done_signal(char **packet)
         err_code = sd_ble_gap_disconnect(m_conn_handle, 
                                          BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
         APP_ERROR_CHECK(err_code);
+    }
+}
+
+/* Reset the total packet buffer to initial values */
+void reset_total_packet(void)
+{
+    for (int i = 0; i < 20; i++) {
+        if (i == 19)               
+          total_packet[i] = 10;
+        else if ((i + 1) % 5 == 0) 
+          total_packet[i] = 44;
+        else
+          total_packet[i] = 48;
     }
 }
 
@@ -850,6 +868,41 @@ void check_for_stayon(char **packet)
     }
 }
 
+/* Switches from demo protocol to client protocol */
+void check_for_client_protocol(char **packet)
+{
+    char *CLIENT_PROTO = "CLIENT_PROTO";
+    if (strstr(*packet, CLIENT_PROTO) != NULL){
+        STAYON_FLAG = true;
+        CLIENT_PROTO_FLAG = true;
+        DEMO_PROTO_FLAG = false;
+        app_timer_stop(m_timer_id);
+        ret_code_t err_code = app_timer_start(m_timer_disconn_delay, 
+                                         APP_TIMER_TICKS(DISCONN_DELAY_MS), NULL);
+        APP_ERROR_CHECK(err_code);
+        NRF_LOG_INFO("Client protocol started\n");
+    }
+}
+
+/* Switches from client protocol to demo protocol.
+ * If STAYON flag is set, the flag is turned off
+ */
+void check_for_demo_protocol(char **packet)
+{
+    char *DEMO_PROTO = "DEMO_PROTO";
+    if (strstr(*packet, DEMO_PROTO) != NULL){
+        STAYON_FLAG = false;
+        DEMO_PROTO_FLAG = true;
+        CLIENT_PROTO_FLAG = false;
+        stop_disconn_delay_timer();
+        app_timer_stop(m_timer_id);
+        ret_code_t err_code;
+        err_code = app_timer_start(m_timer_id, APP_TIMER_TICKS(DEMO_DATA_INTERVAL), NULL);
+        APP_ERROR_CHECK(err_code); 
+        NRF_LOG_INFO("Demo protocol started");
+    }
+}
+
 
 /*
  * Checks packet contents to appropriately perform calibration
@@ -961,16 +1014,24 @@ void nus_data_handler(ble_nus_evt_t * p_evt)
                 }
             } while (err_code == NRF_ERROR_BUSY);
         }
-        // Check pack for calibration protocol details
+        // Check pack for various BLE commands
         check_for_calibration(&data_ptr);
         check_for_pwroff(&data_ptr);
         check_for_stayon(&data_ptr);
         check_for_buffer_done_signal(&data_ptr);
+        check_for_client_protocol(&data_ptr);
+        check_for_demo_protocol(&data_ptr);
     }
 
     if (p_evt->type == BLE_NUS_EVT_COMM_STARTED)
     {
-        send_data_and_restart_timer();
+        if (CLIENT_PROTO_FLAG)
+            send_data_and_restart_timer();
+        else if (DEMO_PROTO_FLAG) {
+            ret_code_t err_code;
+            err_code = app_timer_start(m_timer_id, APP_TIMER_TICKS(DEMO_DATA_INTERVAL), NULL);
+            APP_ERROR_CHECK(err_code); 
+        }
     }
 
 }
@@ -1640,11 +1701,30 @@ void read_saadc_for_regular_protocol(void)
     else {
        AVG_TEMP_VAL = AVG_MV_VAL;
        NRF_LOG_INFO("read temp val, restarting: %d", AVG_TEMP_VAL);
-       calculate_celsius_from_mv(AVG_TEMP_VAL);
        PH_IS_READ = false;
        BATTERY_IS_READ = false;
-       disable_pH_voltage_reading();
-       advertising_start(false);
+       if (CLIENT_PROTO_FLAG) {
+          disable_pH_voltage_reading();
+          advertising_start(false);
+       }
+       else if (DEMO_PROTO_FLAG) {
+          if (!CAL_MODE) {
+            // Create bluetooth data packet
+            create_bluetooth_packet(AVG_PH_VAL, AVG_BATT_VAL, 
+                                    AVG_TEMP_VAL, NULL, total_packet);
+
+            // Send data
+            err_code = ble_nus_data_send(&m_nus, total_packet, 
+                                         &total_size, m_conn_handle);
+            if(err_code != NRF_ERROR_NOT_FOUND)
+                APP_ERROR_CHECK(err_code);
+              
+            NRF_LOG_INFO("BLUETOOTH DATA SENT\n");
+
+            reset_total_packet();
+          }
+          disable_pH_voltage_reading();
+       }
     }    
 }
 
@@ -1698,6 +1778,14 @@ void enable_pH_voltage_reading(void)
         read_saadc_for_regular_protocol();
 }
 
+void restart_pH_interval_timer(void)
+{
+      ret_code_t err_code;
+      err_code = app_timer_start(m_timer_id, APP_TIMER_TICKS(DEMO_DATA_INTERVAL), NULL);
+      APP_ERROR_CHECK(err_code);
+      nrf_pwr_mgmt_run();
+}
+
 
 /* Function unitializes and disables SAADC sampling, restarts timer
  */
@@ -1711,6 +1799,11 @@ void disable_pH_voltage_reading(void)
 
     // *** DISABLE BIASING CIRCUITRY ***
     disable_isfet_circuit();
+
+    if (!CAL_MODE && DEMO_PROTO_FLAG) {
+      // Restart timer
+      restart_pH_interval_timer();
+    }
 }
 
 void single_shot_timer_handler()
@@ -1773,10 +1866,12 @@ void timers_init(void)
                                 APP_TIMER_MODE_SINGLE_SHOT,
                                 single_shot_timer_handler);
     APP_ERROR_CHECK(err_code);
-    err_code = app_timer_create(&m_timer_disconn_delay,
-                                APP_TIMER_MODE_SINGLE_SHOT,
-                                disconn_delay_timer_handler);
-    APP_ERROR_CHECK(err_code);
+    if(CLIENT_PROTO_FLAG) {
+        err_code = app_timer_create(&m_timer_disconn_delay,
+                                    APP_TIMER_MODE_SINGLE_SHOT,
+                                    disconn_delay_timer_handler);
+        APP_ERROR_CHECK(err_code);
+    }
 }
 
 void send_data_and_restart_timer()
@@ -1853,7 +1948,7 @@ void init_and_start_app_timer()
     sd_ble_gap_adv_stop(m_conn_handle);
     ret_code_t err_code;
 
-    err_code = app_timer_start(m_timer_id, APP_TIMER_TICKS(DATA_INTERVAL), NULL);
+    err_code = app_timer_start(m_timer_id, APP_TIMER_TICKS(CLIENT_DATA_INTERVAL), NULL);
     APP_ERROR_CHECK(err_code);
 
     NRF_LOG_INFO("TIMER STARTED (single shot) \n");
@@ -2187,10 +2282,15 @@ int main(void)
     // Init long-term data storage buffers
     init_data_buffers();
     
-    // Start intermittent data reading <> advertising protocol
-    enable_isfet_circuit();
-    nrf_delay_ms(200);
-    enable_pH_voltage_reading();
+    if (CLIENT_PROTO_FLAG) {
+      // Start intermittent data reading <> advertising protocol
+      enable_isfet_circuit();
+      nrf_delay_ms(200);
+      enable_pH_voltage_reading();
+    }
+    else if (DEMO_PROTO_FLAG) {
+      advertising_start(erase_bonds);
+    }
 
     // Enter main loop for power management
     while (true)

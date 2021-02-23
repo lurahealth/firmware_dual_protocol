@@ -256,6 +256,14 @@ uint16_t   total_size = 20;
 #define CAL_DONE_FILE_ID  0x4440
 #define CAL_DONE_REC_KEY  0x4441
 
+/* Used for reading/writing protocol states to flash */
+#define CURR_PROTO_FILE_ID 0x8880
+#define CURR_PROTO_REC_KEY 0x8881
+#define CLIENT 0.0
+#define DEMO   1.0
+float   CURR_STATE = CLIENT;
+
+
 // Forward declarations
 void create_bluetooth_packet(uint32_t ph_val, uint32_t batt_val,        
                              uint32_t temp_val, float ph_val_cal,
@@ -280,6 +288,9 @@ float calculate_celsius_from_mv  (uint32_t mv);
 float validate_float_range        (float val);
 static void advertising_start   (bool erase_bonds);
 static void idle_state_handle   (void);
+static void fds_update          (float value, uint16_t FILE_ID, uint16_t REC_KEY);
+static void fds_write           (float value, uint16_t FILE_ID, uint16_t REC_KEY);
+float        fds_read            (uint16_t FILE_ID, uint16_t REC_KEY);
 uint32_t saadc_result_to_mv     (uint32_t saadc_result);
 uint32_t sensor_temp_comp       (uint32_t raw_analyte_mv, uint32_t temp_mv);
 
@@ -876,7 +887,14 @@ void check_for_client_protocol(char **packet)
         STAYON_FLAG = true;
         CLIENT_PROTO_FLAG = true;
         DEMO_PROTO_FLAG = false;
+        CURR_STATE = CLIENT;
+        // Update record and then double check write was successful
+        fds_update(CURR_STATE, CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY);
+        if(fds_read(CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY) != CLIENT) {
+          fds_write(CURR_STATE, CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY);
+        }
         app_timer_stop(m_timer_id);
+        app_timer_stop(m_timer_disconn_delay);
         ret_code_t err_code = app_timer_start(m_timer_disconn_delay, 
                                          APP_TIMER_TICKS(DISCONN_DELAY_MS), NULL);
         APP_ERROR_CHECK(err_code);
@@ -894,6 +912,12 @@ void check_for_demo_protocol(char **packet)
         STAYON_FLAG = false;
         DEMO_PROTO_FLAG = true;
         CLIENT_PROTO_FLAG = false;
+        CURR_STATE = DEMO;
+        // Update record and then double check write was successful
+        fds_update(CURR_STATE, CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY);
+        if(fds_read(CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY) != DEMO) {
+          fds_write(CURR_STATE, CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY);
+        }
         stop_disconn_delay_timer();
         app_timer_stop(m_timer_id);
         ret_code_t err_code;
@@ -1866,12 +1890,12 @@ void timers_init(void)
                                 APP_TIMER_MODE_SINGLE_SHOT,
                                 single_shot_timer_handler);
     APP_ERROR_CHECK(err_code);
-    if(CLIENT_PROTO_FLAG) {
-        err_code = app_timer_create(&m_timer_disconn_delay,
-                                    APP_TIMER_MODE_SINGLE_SHOT,
-                                    disconn_delay_timer_handler);
-        APP_ERROR_CHECK(err_code);
-    }
+
+    err_code = app_timer_create(&m_timer_disconn_delay,
+                                APP_TIMER_MODE_SINGLE_SHOT,
+                                disconn_delay_timer_handler);
+    APP_ERROR_CHECK(err_code);
+
 }
 
 void send_data_and_restart_timer()
@@ -2055,6 +2079,9 @@ static void fds_write(float value, uint16_t FILE_ID, uint16_t REC_KEY)
     else if(FILE_ID == CAL_DONE_FILE_ID && REC_KEY == CAL_DONE_REC_KEY) {
       record.data.p_data = &CAL_PERFORMED;
     }
+    else if(FILE_ID == CURR_PROTO_FILE_ID && REC_KEY == CURR_PROTO_REC_KEY) {
+      record.data.p_data = &CURR_STATE;
+    }
                     
     ret_code_t ret = fds_record_write(&record_desc, &record);
     if (ret != FDS_SUCCESS)
@@ -2091,6 +2118,10 @@ static void fds_update(float value, uint16_t FILE_ID, uint16_t REC_KEY)
     else if(FILE_ID == CAL_DONE_FILE_ID && REC_KEY == CAL_DONE_REC_KEY) {
       record.data.p_data = &CAL_PERFORMED;
       fds_record_find(CAL_DONE_FILE_ID, CAL_DONE_REC_KEY, &record_desc, &ftok);
+    }
+    else if(FILE_ID == CURR_PROTO_FILE_ID && REC_KEY == CURR_PROTO_REC_KEY) {
+      record.data.p_data = &CURR_STATE;
+      fds_record_find(CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY, &record_desc, &ftok);
     }
                     
     ret_code_t ret = fds_record_update(&record_desc, &record);
@@ -2228,6 +2259,22 @@ void write_cal_values_to_flash(void)
     }
 }
 
+void check_protocol_state(void)
+{
+    // fds_read will return 0 if the CURR_PROTO record does not exist, 
+    // or if the stored value is 0 (CLIENT = 0.0, DEMO = 1.0)
+    CURR_STATE = fds_read(CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY);
+    NRF_LOG_INFO("Stored protocol state: " NRF_LOG_FLOAT_MARKER "\n", NRF_LOG_FLOAT(CURR_STATE));
+    if (CURR_STATE == CLIENT) {
+      CLIENT_PROTO_FLAG = true;
+      DEMO_PROTO_FLAG = false;
+    }
+    else if (CURR_STATE == DEMO) {
+      CLIENT_PROTO_FLAG = false;
+      DEMO_PROTO_FLAG = true;
+    }
+}
+
 void send_next_packet_in_buffer()
 {
      uint32_t err_code;
@@ -2265,9 +2312,10 @@ int main(void)
     log_init();
     power_management_init();
 
-    // Initialize fds and check for calibration values
+    // Initialize fds and check for calibration values, protocol state
     fds_init_helper();
     check_calibration_state();
+    check_protocol_state();
 
     // Continue with adjusted calibration state
     ble_stack_init();

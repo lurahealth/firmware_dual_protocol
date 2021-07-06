@@ -117,7 +117,7 @@
 
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 
-#define DEVICE_NAME                     "LuraHealth_Dan59"                             /**< Name of device. Will be included in the advertising data. */
+#define DEVICE_NAME                     "LuraHealth_TEST"                           /**< Name of device. Will be included in the advertising data. */
 #define NUS_SERVICE_UUID_TYPE           BLE_UUID_TYPE_VENDOR_BEGIN                  /**< UUID type for the Nordic UART Service (vendor specific). */
 
 #define APP_BLE_OBSERVER_PRIO           3                                           /**< Application's BLE observer priority. You shouldn't need to modify this value. */
@@ -150,8 +150,9 @@
 
 #define SAMPLES_IN_BUFFER               50                                          /**< SAADC buffer > */
 
-//#define CLIENT_DATA_INTERVAL            300000
-#define CLIENT_DATA_INTERVAL            4000
+//#define CLIENT_DATA_INTERVAL            895000
+//#define DEMO_DATA_INTERVAL              1000
+#define CLIENT_DATA_INTERVAL            10000
 #define DEMO_DATA_INTERVAL              1000
 
 #define NRF_SAADC_CUSTOM_CHANNEL_CONFIG_SE(PIN_P) \
@@ -189,7 +190,7 @@ APP_TIMER_DEF(m_timer_id);
 // Timer and control flag to enable delay before disconnecting
 APP_TIMER_DEF(m_timer_disconn_delay);
 bool   DISCONN_DELAY    = true;
-#define DISCONN_DELAY_MS   10000 
+#define DISCONN_DELAY_MS   4000 
 
 
 static uint16_t   m_conn_handle          = BLE_CONN_HANDLE_INVALID;                 /**< Handle of the current connection. */
@@ -222,7 +223,7 @@ float     MVAL_CALIBRATION = 0;
 float     BVAL_CALIBRATION = 0;
 float     RVAL_CALIBRATION = 0;
 float     CAL_PERFORMED    = 0;
-bool     STAYON_FLAG       = false;
+bool     STAYON_FLAG       = true;
 bool     PH_IS_READ        = false;
 bool     BATTERY_IS_READ   = false;
 bool     SAADC_CALIBRATED  = false;
@@ -234,7 +235,7 @@ bool     PT3_READ          = false;
 bool     SEND_BUFFERED_DATA  = false;
 bool     HVN_TX_EVT_COMPLETE = false;
 bool     DEMO_PROTO_FLAG     = false;
-bool     CLIENT_PROTO_FLAG   = true;  // Always begin in client mode
+bool     CLIENT_PROTO_FLAG   = true;  // Always begin in demo mode
 
 static volatile uint8_t write_flag=0;
 
@@ -259,9 +260,9 @@ uint16_t   total_size = 20;
 /* Used for reading/writing protocol states to flash */
 #define CURR_PROTO_FILE_ID 0x8880
 #define CURR_PROTO_REC_KEY 0x8881
-#define CLIENT 0.0
-#define DEMO   1.0
-float   CURR_STATE = CLIENT;
+#define CLIENT 1.0
+#define DEMO   0.0
+float   CURR_STATE = DEMO;
 
 
 // Forward declarations
@@ -294,6 +295,18 @@ float        fds_read            (uint16_t FILE_ID, uint16_t REC_KEY);
 uint32_t saadc_result_to_mv     (uint32_t saadc_result);
 uint32_t sensor_temp_comp       (uint32_t raw_analyte_mv, uint32_t temp_mv);
 
+
+/*
+ * Custom error handler
+ *
+ */
+//void app_error_fault_handler(uint32_t id, uint32_t pc, uint32_t info)
+//{
+//    __disable_irq();
+//    NRF_LOG_FINAL_FLUSH();
+//    NRF_LOG_INFO("LMAO OVERWRITTEN BITCH");
+//    NVIC_SystemReset();
+//}
 /* 
  * Buffers for storing data through System ON sleep periods
  *
@@ -879,12 +892,14 @@ void check_for_stayon(char **packet)
     }
 }
 
-/* Switches from demo protocol to client protocol */
+/* Switches from demo protocol to client protocol,
+ * STAYON_FLAG is turned off by default
+ */
 void check_for_client_protocol(char **packet)
 {
     char *CLIENT_PROTO = "CLIENT_PROTO";
     if (strstr(*packet, CLIENT_PROTO) != NULL){
-        STAYON_FLAG = true;
+        STAYON_FLAG = false;
         CLIENT_PROTO_FLAG = true;
         DEMO_PROTO_FLAG = false;
         CURR_STATE = CLIENT;
@@ -1742,7 +1757,7 @@ void read_saadc_for_regular_protocol(void)
                                          &total_size, m_conn_handle);
             if(err_code != NRF_ERROR_NOT_FOUND)
                 APP_ERROR_CHECK(err_code);
-              
+            
             NRF_LOG_INFO("BLUETOOTH DATA SENT\n");
 
             reset_total_packet();
@@ -2262,7 +2277,7 @@ void write_cal_values_to_flash(void)
 void check_protocol_state(void)
 {
     // fds_read will return 0 if the CURR_PROTO record does not exist, 
-    // or if the stored value is 0 (CLIENT = 0.0, DEMO = 1.0)
+    // or if the stored value is 0 (CLIENT = 1.0, DEMO = 100)
     CURR_STATE = fds_read(CURR_PROTO_FILE_ID, CURR_PROTO_REC_KEY);
     NRF_LOG_INFO("Stored protocol state: " NRF_LOG_FLOAT_MARKER "\n", NRF_LOG_FLOAT(CURR_STATE));
     if (CURR_STATE == CLIENT) {

@@ -42,8 +42,6 @@
 "Output/ble_app_uart_pca10040e_s112 Release/Obj/nrfx_saadc.o"
 "Output/ble_app_uart_pca10040e_s112 Release/Obj/nrfx_timer.o"
 "Output/ble_app_uart_pca10040e_s112 Release/Obj/nrfx_uart.o"
-"Output/ble_app_uart_pca10040e_s112 Release/Obj/bsp.o"
-"Output/ble_app_uart_pca10040e_s112 Release/Obj/bsp_btn_ble.o"
 "Output/ble_app_uart_pca10040e_s112 Release/Obj/SEGGER_RTT.o"
 "Output/ble_app_uart_pca10040e_s112 Release/Obj/SEGGER_RTT_Syscalls_SES.o"
 "Output/ble_app_uart_pca10040e_s112 Release/Obj/SEGGER_RTT_printf.o"
